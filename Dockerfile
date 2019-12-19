@@ -1,0 +1,22 @@
+FROM alpine
+#声明作者
+LABEL maintainer="mysql docker Autre <mo@autre.cn>"
+#升级内核及软件
+RUN apk update \
+    && apk upgrade \
+    ##设置时区
+    && apk --update add --no-cache tzdata \
+    && cp /usr/share/zoneinfo/Asia/Shanghai /etc/localtime \
+    && apk del tzdata \
+    ## 清除安装软件及缓存
+    && rm -rf /tmp/* /var/cache/apk/*
+##安装nginx
+RUN apk --update add --no-cache mysql \
+    && rm -rf /tmp/* /var/cache/apk/* \
+    ## 创建网站和日志目录
+    && mkdir -p /var/wwwroot /var/wwwlogs
+
+WORKDIR /run/mysqld
+#开放端口
+EXPOSE 3306
+CMD ["nginx","-g","daemon off;"]
