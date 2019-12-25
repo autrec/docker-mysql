@@ -21,7 +21,7 @@ RUN apk update \
     ## 清除安装软件及缓存
     && rm -rf /tmp/* /var/cache/apk/*
 ##安装msyql
-RUN apk --update add --no-cache mysql \
+RUN apk --update add --no-cache mysql mysql-client \
     && rm -rf /tmp/* /var/cache/apk/*
 #进入工作目录
 WORKDIR /run/mysqld
