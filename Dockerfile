@@ -1,39 +1,78 @@
-FROM alpine
-#声明作者
-LABEL maintainer="mysql docker Autre <mo@autre.cn>"
-##设置变量
-#ENV MYSQL_ROOT_PASSWORD=password \
-#    MYSQL_DATABASE=test \
-#    MYSQL_USER=test \
-#    MYSQL_PASSWORD=test
-ARG MYSQL_ROOT_PASSWORD=sdjfoweifjiwej
-ARG MYSQL_DATABASE=test
-ARG MYSQL_USER=test
-ARG MYSQL_PASSWORD=test
+FROM debian:buster-slim
 
-#升级内核及软件
-RUN apk update \
-    && apk upgrade \
-    ##设置时区
-    && apk --update add --no-cache tzdata \
-    && cp /usr/share/zoneinfo/Asia/Shanghai /etc/localtime \
-    && apk del tzdata \
-    ## 清除安装软件及缓存
-    && rm -rf /tmp/* /var/cache/apk/*
-##安装msyql
-RUN apk --update add --no-cache mysql mysql-client \
-    && rm -rf /tmp/* /var/cache/apk/*
-#进入工作目录
-WORKDIR /run/mysqld
-##运行数据库
-RUN mysql_install_db --user=root > /dev/null
-RUN mysqld --user=root --bootstrap --verbose=0
+# add our user and group first to make sure their IDs get assigned consistently, regardless of whatever dependencies get added
+RUN groupadd -g 9009 -r mysql && useradd -u 9009 -r -g mysql mysql
 
-##载入配置文件
-COPY my.cnf /etc/mysql/my.cnf
-##挂载目录
-VOLUME ["/var/lib/mysql","/var/lib/mysql/mysql-bin"]
+RUN apt-get update && apt-get install -y --no-install-recommends gnupg dirmngr && rm -rf /var/lib/apt/lists/*
 
-#开放端口
-EXPOSE 3306
-CMD ["mysqld","--user=root","--console","daemon off;"]
+# add gosu for easy step-down from root
+ENV GOSU_VERSION 1.7
+RUN set -x \
+	&& apt-get update && apt-get install -y --no-install-recommends ca-certificates wget tzdata && rm -rf /var/lib/apt/lists/* \
+	&& cp /usr/share/zoneinfo/Asia/Shanghai /etc/localtime \
+	&& wget -O /usr/local/bin/gosu "https://github.com/tianon/gosu/releases/download/$GOSU_VERSION/gosu-$(dpkg --print-architecture)" \
+	&& wget -O /usr/local/bin/gosu.asc "https://github.com/tianon/gosu/releases/download/$GOSU_VERSION/gosu-$(dpkg --print-architecture).asc" \
+	&& export GNUPGHOME="$(mktemp -d)" \
+	&& gpg --batch --keyserver ha.pool.sks-keyservers.net --recv-keys B42F6819007F00F88E364FD4036A9C25BF357DD4 \
+	&& gpg --batch --verify /usr/local/bin/gosu.asc /usr/local/bin/gosu \
+	&& gpgconf --kill all \
+	&& rm -rf "$GNUPGHOME" /usr/local/bin/gosu.asc \
+	&& chmod +x /usr/local/bin/gosu \
+	&& gosu nobody true \
+	&& apt-get purge -y --auto-remove ca-certificates wget tzdata
+
+RUN mkdir /docker-entrypoint-initdb.d
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+# for MYSQL_RANDOM_ROOT_PASSWORD
+		pwgen \
+# for mysql_ssl_rsa_setup
+		openssl \
+# FATAL ERROR: please install the following Perl modules before executing /usr/local/mysql/scripts/mysql_install_db:
+# File::Basename
+# File::Copy
+# Sys::Hostname
+# Data::Dumper
+		perl \
+# install "xz-utils" for .sql.xz docker-entrypoint-initdb.d files
+		xz-utils \
+	&& rm -rf /var/lib/apt/lists/*
+
+RUN set -ex; \
+# gpg: key 5072E1F5: public key "MySQL Release Engineering <mysql-build@oss.oracle.com>" imported
+	key='A4A9406876FCBD3C456770C88C718D3B5072E1F5'; \
+	export GNUPGHOME="$(mktemp -d)"; \
+	gpg --batch --keyserver ha.pool.sks-keyservers.net --recv-keys "$key"; \
+	gpg --batch --export "$key" > /etc/apt/trusted.gpg.d/mysql.gpg; \
+	gpgconf --kill all; \
+	rm -rf "$GNUPGHOME"; \
+	apt-key list > /dev/null
+
+ENV MYSQL_MAJOR 8.0
+ENV MYSQL_VERSION 8.0.19-1debian10
+
+RUN echo "deb http://repo.mysql.com/apt/debian/ buster mysql-${MYSQL_MAJOR}" > /etc/apt/sources.list.d/mysql.list
+
+# the "/var/lib/mysql" stuff here is because the mysql-server postinst doesn't have an explicit way to disable the mysql_install_db codepath besides having a database already "configured" (ie, stuff in /var/lib/mysql/mysql)
+# also, we set debconf keys to make APT a little quieter
+RUN { \
+		echo mysql-community-server mysql-community-server/data-dir select ''; \
+		echo mysql-community-server mysql-community-server/root-pass password ''; \
+		echo mysql-community-server mysql-community-server/re-root-pass password ''; \
+		echo mysql-community-server mysql-community-server/remove-test-db select false; \
+	} | debconf-set-selections \
+	&& apt-get update && apt-get install -y mysql-community-client="${MYSQL_VERSION}" mysql-community-server-core="${MYSQL_VERSION}" && rm -rf /var/lib/apt/lists/* \
+	&& rm -rf /var/lib/mysql && mkdir -p /var/lib/mysql /var/run/mysqld \
+	&& chown -R mysql:mysql /var/lib/mysql /var/run/mysqld \
+# ensure that /var/run/mysqld (used for socket and lock files) is writable regardless of the UID our mysqld instance ends up having at runtime
+	&& chmod 777 /var/run/mysqld
+
+VOLUME /var/lib/mysql
+# Config files
+COPY config/ /etc/mysql/
+COPY docker-entrypoint.sh /usr/local/bin/
+RUN ln -s usr/local/bin/docker-entrypoint.sh /entrypoint.sh # backwards compat
+ENTRYPOINT ["docker-entrypoint.sh"]
+
+EXPOSE 3306 33060
+CMD ["mysqld"]
